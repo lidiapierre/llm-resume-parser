@@ -4,6 +4,8 @@ from langchain.output_parsers import PydanticOutputParser
 from langchain.prompts import PromptTemplate
 
 
+# --------------------------------------------------------------------------------------------------------------- #
+# Basic Info model and prompts
 class BasicInfo(BaseModel):
     name: str = Field(description="name of the candidate")
     bio: str = Field(description="Bio, profile, introduction or summary of the candidate")
@@ -21,6 +23,14 @@ basic_details_prompt = PromptTemplate(
 )
 
 
+fallback_basic_info_prompt = PromptTemplate(
+    template="What is the {query}?\nRESUME:\n{resume}\nANSWER:\n",
+    input_variables=["query", "resume"]
+)
+
+
+# --------------------------------------------------------------------------------------------------------------- #
+# Work Experience model and prompts
 class WorkExperience(BaseModel):
     """Work experiences"""
     company_name: str = Field(description="name of the company")
@@ -67,6 +77,8 @@ companies_prompt = PromptTemplate(
 )
 
 
+# --------------------------------------------------------------------------------------------------------------- #
+# Skills and other info model and prompts
 class Skills(BaseModel):
     skills: List[str] = Field(description="list of skills, programming languages, IT tools, software skills")
     professional_development: Optional[List[str]] = Field(
@@ -96,7 +108,15 @@ skills_prompt = PromptTemplate(
     partial_variables={"format_instructions": skills_parser.get_format_instructions()},
 )
 
+fallback_skills_prompt = PromptTemplate(
+    template="""What are the skills in this resume ?\nRESUME:\n{resume}\n
+        Answer with a comma separated list.""",
+    input_variables=["resume"]
+)
 
+
+# --------------------------------------------------------------------------------------------------------------- #
+# Education model and prompts
 class Education(BaseModel):
     """Education qualification"""
     qualification: str = Field(description="university or high-school education qualification or degree")
@@ -117,5 +137,3 @@ fallback_education_prompt = PromptTemplate(
              "ANSWER:\n",
     input_variables=["resume"],
 )
-
-

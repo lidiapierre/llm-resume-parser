@@ -15,8 +15,12 @@ from langchain.chains.openai_tools import create_extraction_chain_pydantic
 from langchain.chat_models import ChatOpenAI
 from openai import OpenAI
 
-from pydantic_models_prompts import Education, WorkExperience, skills_prompt, basic_details_prompt, \
+from pydantic_models_prompts import Education, WorkExperience
+from pydantic_models_prompts import (
+    basic_details_prompt, fallback_basic_info_prompt,
+    skills_prompt, fallback_skills_prompt,
     fallback_education_prompt, companies_prompt, work_experience_prompt
+)
 from utils import extract_emails, extract_github_and_linkedin_urls
 from utils import output_template
 
@@ -40,24 +44,9 @@ class ResumeManager:
 
     def process_file(self):
         self.extract_basic_info()
-        try:
-            self.extract_work_experience()
-        except openai.APITimeoutError:
-            logger.warning("Work extraction timed out")
-            self.fallback_extract_work_experience()
-
-        try:
-            self.extract_skills()
-        except openai.APITimeoutError:
-            logger.warning("Skills extraction timed out")
-            self.fallback_extract_skills()
-
-        try:
-            self.extract_education()
-        except openai.APITimeoutError:
-            logger.warning("Education extraction timed out")
-            self.fallback_extract_education()
-
+        self.extract_work_experience()
+        self.extract_skills()
+        self.extract_education()
 
     def extract_pydantic(self, target):
         start = time.time()
@@ -102,7 +91,19 @@ class ResumeManager:
 
         try:
             self.output['candidate_name'] = output['name']
+        except KeyError:
+            query = fallback_basic_info_prompt.format(query='name', resume=self.resume)
+            name, _ = self.query_model(query, json_mode=False)
+            self.output['candidate_name'] = name
+
+        try:
             self.output['job_title'] = output['job_title']
+        except KeyError:
+            query = fallback_basic_info_prompt.format(query='current or last job title', resume=self.resume)
+            title, _ = self.query_model(query, json_mode=False)
+            self.output['job_title'] = title
+
+        try:
             self.output['bio'] = output['bio']
         except KeyError:
             pass
@@ -116,46 +117,54 @@ class ResumeManager:
         self.output['contact_info']['personal_urls'] = extract_github_and_linkedin_urls(self.resume)
 
     def extract_skills(self):
-        query = skills_prompt.format(resume=self.resume)
-        output, seconds = self.query_model(query)
-        output = json.loads(output)
-        logger.debug(f"# Skills Extract:\n{output}")
-        logger.info(f"# Skills Extraction took {seconds} seconds")
+        try:
+            query = skills_prompt.format(resume=self.resume)
+            output, seconds = self.query_model(query)
+            output = json.loads(output)
+            logger.debug(f"# Skills Extract:\n{output}")
+            logger.info(f"# Skills Extraction took {seconds} seconds")
+            self.output['skills'] = output['skills']
+            if 'professional_development' in output:
+                self.output['professional_development'] = output['professional_development']
+            if 'other' in output:
+                self.output['other_info'] = output['other']
 
-        self.output['skills'] = output['skills']
-        if 'professional_development' in output:
-            self.output['professional_development'] = output['professional_development']
-        if 'other' in output:
-            self.output['other_info'] = output['other']
-
-    def fallback_extract_skills(self):
-        query = f"""
-        What are the skills in this resume ?\nRESUME:\n{self.resume}\n
-        Answer with a comma separated list.
-        """
-        output, seconds = self.query_model(query, json_mode=False)
-        self.output['skills'] = output
+        except openai.APITimeoutError:
+            logger.warning("Skills extraction timed out")
+            query = fallback_skills_prompt.format(self.resume)
+            output, seconds = self.query_model(query, json_mode=False)
+            logger.debug(f"# Skills Extract:\n{output}")
+            logger.info(f"# Skills Extraction took {seconds} seconds")
+            self.output['skills'] = output
 
     def extract_education(self):
-        output, seconds = self.extract_pydantic(Education)
-        logger.debug(f"# Education Extract:\n{output}")
-        logger.info(f"# Education Extraction took {seconds} seconds")
-        self.output['education'] = [json.loads(x.json().encode('utf-8')) for x in output]
+        try:
+            output, seconds = self.extract_pydantic(Education)
+            logger.debug(f"# Education Extract:\n{output}")
+            logger.info(f"# Education Extraction took {seconds} seconds")
+            self.output['education'] = [json.loads(x.json().encode('utf-8')) for x in output]
 
-    def fallback_extract_education(self):
-        query = fallback_education_prompt.format(resume=self.resume)
-        output, seconds = self.query_model(query, json_mode=False)
-        self.output['education'] = output
+        except openai.APITimeoutError:
+            logger.warning("Education extraction timed out")
+            query = fallback_education_prompt.format(resume=self.resume)
+            output, seconds = self.query_model(query, json_mode=False)
+            logger.debug(f"# Education Extract:\n{output}")
+            logger.info(f"# Education Extraction took {seconds} seconds")
+            self.output['education'] = output
 
     def extract_work_experience(self):
-        output, seconds = self.extract_pydantic(WorkExperience)
-        logger.debug(f"# Work Experience Extract:\n{output}")
-        logger.info(f"# Work Experience Extraction took {seconds} seconds")
-        self.output['work_output'] = [json.loads(x.json().encode('utf-8')) for x in output]
+        try:
+            output, seconds = self.extract_pydantic(WorkExperience)
+            logger.debug(f"# Work Experience Extract:\n{output}")
+            logger.info(f"# Work Experience Extraction took {seconds} seconds")
+            self.output['work_output'] = [json.loads(x.json().encode('utf-8')) for x in output]
+        except openai.APITimeoutError:
+            logger.warning("Work extraction timed out")
+            self.fallback_extract_work_experience()
 
     def fallback_extract_work_experience(self):
         query = companies_prompt.format(resume=self.resume)
-        output, seconds = self.query_model(query, json_mode=False)
+        output, _ = self.query_model(query, json_mode=False)
 
         for line in output.split('\n'):
             if "answer" in line.lower():
@@ -172,14 +181,16 @@ class ResumeManager:
             query = work_experience_prompt.format(resume=self.resume, role=role, company=company_name)
             output, seconds = self.query_model(query, json_mode=True)
             parsed_output = json.loads(output, strict=False)
+            logger.debug(f"# Intermediary Work Experience Extract:\n{parsed_output}")
+            logger.info(f"# Intermediary Work Experience Extraction took {seconds} seconds")
             self.output['work_output'].append(parsed_output)
 
 
-def get_resume_content(file, extension=None):
+def get_resume_content(file_path, extension=None):
     if not extension:
-        extension = os.path.splitext(file)[1]
+        extension = os.path.splitext(file_path)[1]
     if extension == '.pdf':
-        pdf_reader = PdfReader(file)
+        pdf_reader = PdfReader(file_path)
         content = ""
         for page in pdf_reader.pages:
             text = page.extract_text()
@@ -189,7 +200,7 @@ def get_resume_content(file, extension=None):
                     content += line
                     content += '\n'
     elif extension in ['.docx', '.doc']:
-        doc = docx.Document(file)
+        doc = docx.Document(file_path)
         content = ""
         for paragraph in doc.paragraphs:
             content += paragraph.text + "\n"
@@ -201,7 +212,7 @@ def get_resume_content(file, extension=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parse a Resume with Open AI GPT models")
-    parser.add_argument("file_path", help="Path to the resume")
+    parser.add_argument("file_path", help="Path to the resume, accepted types .pdf or .docx")
     parser.add_argument("--model_name", default='gpt-3.5-turbo-1106',
                         help="Name of the model, default to gpt-3.5-turbo-1106")
 
