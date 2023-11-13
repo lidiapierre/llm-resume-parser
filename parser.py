@@ -15,6 +15,8 @@ from langchain.chains.openai_tools import create_extraction_chain_pydantic
 from langchain.chat_models import ChatOpenAI
 from openai import OpenAI
 
+import threading
+
 from pydantic_models_prompts import Education, WorkExperience
 from pydantic_models_prompts import (
     basic_details_prompt, fallback_basic_info_prompt,
@@ -43,10 +45,19 @@ class ResumeManager:
         self.companies = []
 
     def process_file(self):
-        self.extract_basic_info()
-        self.extract_work_experience()
-        self.extract_skills()
-        self.extract_education()
+        all_threads = []
+        for target in [
+            self.extract_work_experience(),
+            self.extract_basic_info(),
+            self.extract_education(),
+            self.extract_skills()
+        ]:
+            thread = threading.Thread(target=target)
+            all_threads.append(thread)
+            thread.start()
+
+        for thread in all_threads:
+            thread.join()
 
     def extract_pydantic(self, target):
         start = time.time()
@@ -166,6 +177,8 @@ class ResumeManager:
         query = companies_prompt.format(resume=self.resume)
         output, _ = self.query_model(query, json_mode=False)
 
+        all_threads = []
+
         for line in output.split('\n'):
             if "answer" in line.lower():
                 continue
@@ -178,12 +191,20 @@ class ResumeManager:
             except IndexError:
                 role = ""
 
-            query = work_experience_prompt.format(resume=self.resume, role=role, company=company_name)
-            output, seconds = self.query_model(query, json_mode=True)
-            parsed_output = json.loads(output, strict=False)
-            logger.debug(f"# Intermediary Work Experience Extract:\n{parsed_output}")
-            logger.info(f"# Intermediary Work Experience Extraction took {seconds} seconds")
-            self.output['work_output'].append(parsed_output)
+            thread = threading.Thread(target=self.get_intermediary_work_experience, args=(company_name, role))
+            all_threads.append(thread)
+            thread.start()
+
+        for thread in all_threads:
+            thread.join()
+
+    def get_intermediary_work_experience(self, company_name, role):
+        query = work_experience_prompt.format(resume=self.resume, role=role, company=company_name)
+        output, seconds = self.query_model(query, json_mode=True)
+        parsed_output = json.loads(output, strict=False)
+        logger.debug(f"# Intermediary Work Experience Extract:\n{parsed_output}")
+        logger.info(f"# Intermediary Work Experience Extraction took {seconds} seconds")
+        self.output['work_output'].append(parsed_output)
 
 
 def get_resume_content(file_path, extension=None):
@@ -220,7 +241,10 @@ if __name__ == "__main__":
     logging.info(f"Processing {args.file_path}")
 
     resume_manager = ResumeManager(args.file_path, args.model_name)
+
+    start_time = time.time()
     resume_manager.process_file()
+    end_time = time.time()
 
     resume_name = Path(args.file_path).stem
     output_file_path = f"parsed_outputs/{resume_name}_output.json"
@@ -228,3 +252,7 @@ if __name__ == "__main__":
         json.dump(resume_manager.output, file, indent=2)
 
     print(json.dumps(resume_manager.output, indent=2))
+
+    seconds = end_time - start_time
+    m, s = divmod(seconds, 60)
+    logger.info(f"Total time {int(m)} min {int(s)} seconds")
